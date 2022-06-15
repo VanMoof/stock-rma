@@ -146,8 +146,10 @@ class RmaMakePicking(models.TransientModel):
             group = self.env['procurement.group'].create(pg_data)
         if picking_type == 'incoming':
             qty = item.qty_to_receive
+            force_rule_ids = item.line_id.in_route_id.rule_ids.ids
         else:
             qty = item.qty_to_deliver
+            force_rule_ids = item.line_id.out_route_id.rule_ids.ids
         values = self._get_procurement_data(item, group, qty, picking_type)
         product = values.get('product_id') or item.line_id.product_id
         uom = self.env['uom.uom'].browse(
@@ -161,7 +163,9 @@ class RmaMakePicking(models.TransientModel):
             )
         # create picking
         try:
-            self.env['procurement.group'].run(
+            self.env['procurement.group'].with_context(
+                rma_force_rule_ids=force_rule_ids
+            ).run(
                 product,
                 qty,
                 uom,
