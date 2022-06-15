@@ -1,7 +1,8 @@
 # Copyright (C) 2017 Eficent Business and IT Consulting Services S.L.
 # License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl.html)
 
-from odoo import fields, models
+from odoo import _, api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class StockRule(models.Model):
@@ -45,3 +46,21 @@ class ProcurementGroup(models.Model):
         comodel_name='rma.order.line', string='RMA line',
         ondelete="set null",
     )
+
+    @api.model
+    def _get_rule(self, product_id, location_id, values):
+        """Ensure that the selected rule is from the configured route"""
+        res = super()._get_rule(product_id, location_id, values)
+        force_rule_ids = self.env.context.get("rma_force_rule_ids")
+        if force_rule_ids:
+            if res and res.id not in force_rule_ids:
+                raise ValidationError(_(
+                    "No rule found in this RMA's configured route for product "
+                    "%s and location %s" % (
+                        product_id.default_code or product_id.name,
+                        location_id.complete_name,
+                    )
+                ))
+            # Don't enforce rules on any chained moves
+            force_rule_ids.clear()
+        return res

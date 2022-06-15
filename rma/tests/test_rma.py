@@ -1,7 +1,7 @@
 # © 2017 Eficent Business and IT Consulting Services S.L.
 # License LGPL-3.0 or later (https://www.gnu.org/licenses/lgpl.html)
 
-from odoo.tests import common
+from odoo.tests import common, Form
 from odoo.exceptions import ValidationError
 
 
@@ -119,14 +119,6 @@ class TestRma(common.SavepointCase):
                                 str(cls.partner_id.id)])
                 data = wizard.with_context(customer=1).\
                     _prepare_rma_line_from_stock_move(move)
-                wizard.add_lines()
-
-                if move.product_id.rma_customer_operation_id:
-                    move.product_id.rma_customer_operation_id.in_route_id = \
-                        False
-                move.product_id.categ_id.rma_customer_operation_id = False
-                move.product_id.rma_customer_operation_id = False
-                wizard._prepare_rma_line_from_stock_move(move)
 
             else:
                 wizard = cls.rma_add_stock_move.new(
@@ -144,16 +136,8 @@ class TestRma(common.SavepointCase):
                     'active_model': 'rma.order',
                 }).default_get([str(move.id),
                                 str(cls.partner_id.id)])
-                data = wizard.with_context(customer=1).\
-                    _prepare_rma_line_from_stock_move(move)
-                wizard.add_lines()
-
-                if move.product_id.rma_customer_operation_id:
-                    move.product_id.rma_customer_operation_id.in_route_id = \
-                        False
-                move.product_id.categ_id.rma_supplier_operation_id = False
-                move.product_id.rma_supplier_operation_id = False
-                wizard._prepare_rma_line_from_stock_move(move)
+                data = wizard._prepare_rma_line_from_stock_move(move)
+                data['type'] = 'supplier'
 
             if dropship:
                 data.update(customer_to_supplier=dropship,
@@ -401,6 +385,54 @@ class TestRma(common.SavepointCase):
         self.rma_customer_id.action_view_out_shipments()
         self.rma_customer_id.action_view_lines()
 
+    def test_06_no_zero_qty_moves(self):
+        rma_lines = self.rma_customer_id.rma_line_ids
+        rma_lines.write({"receipt_policy": "delivered"})
+        self.assertEqual(sum(rma_lines.mapped("qty_to_receive")), 0)
+        wizard = self.rma_make_picking.with_context({
+            'active_ids': rma_lines.ids,
+            'active_model': 'rma.order.line',
+            'picking_type': 'incoming',
+            'active_id': 1
+        }).create({})
+        with self.assertRaisesRegex(ValidationError, "No quantity to transfer"):
+            wizard._create_picking()
+
+    def test_07_warehouse_mismatch(self):
+        """Mismatch between operation warehouse and stock rule warehouse is raised.
+
+        * Create a second warehouse that is resupplied from the main warehouse
+        * Update an RMA to receive into the second warehouse
+        * When creating pickings, it is raised that the rules from the RMA
+        * config are not used.
+        """
+        wh2 = self.env['stock.warehouse'].create({
+            'name': 'Shop.',
+            'code': 'SHP',
+        })
+        wh2.resupply_wh_ids = self.env.ref('stock.warehouse0')
+        wh2.rma_in_this_wh = True
+        wh2.lot_rma_id = self.env["stock.location"].create({
+            "name": "WH2 RMA",
+            "usage": "internal",
+            "location_id": wh2.lot_stock_id.id,
+        })
+        rma = self.rma_customer_id.copy()
+        rma.rma_line_ids = self.rma_customer_id.rma_line_ids[0].copy()
+        rma.rma_line_ids.product_id.route_ids += wh2.resupply_route_ids
+        rma_form = Form(rma)
+        rma_form.in_warehouse_id = wh2
+        rma_form.save()
+        rma.rma_line_ids.action_rma_approve()
+        wizard = self.rma_make_picking.with_context({
+            'active_ids': rma.rma_line_ids.ids,
+            'active_model': 'rma.order.line',
+            'picking_type': 'incoming',
+            'active_id': 1
+        }).create({})
+        with self.assertRaisesRegex(ValidationError, "No rule found"):
+            wizard._create_picking()
+
     # DROPSHIP
     def test_03_dropship(self):
         for line in self.rma_droship_id.rma_line_ids:
@@ -559,8 +591,8 @@ class TestRma(common.SavepointCase):
         self.assertEquals(len(moves), 3,
                           "Incorrect number of moves created")
         for line in self.rma_supplier_id.rma_line_ids:
-            self.assertEquals(line.qty_incoming, 0,
-                              "Wrong qty incoming")
+            self.assertEquals(line.qty_outgoing, 0,
+                              "Wrong qty outgoing")
             self.assertEquals(line.qty_received, 0,
                               "Wrong qty received")
             self.assertEquals(line.qty_to_deliver, 0,
@@ -568,7 +600,7 @@ class TestRma(common.SavepointCase):
             if line.product_id == self.product_1:
                 self.assertEquals(line.qty_to_receive, 3,
                                   "Wrong qty to receive")
-                self.assertEquals(line.qty_incoming, 0,
+                self.assertEquals(line.qty_incoming, 3,
                                   "Wrong qty incoming")
             if line.product_id == self.product_2:
                 self.assertEquals(line.qty_to_receive, 5,
@@ -577,25 +609,25 @@ class TestRma(common.SavepointCase):
                 self.assertEquals(line.qty_to_receive, 2,
                                   "Wrong qty to receive")
         picking_out.action_assign()
-        for mv in picking.move_lines:
+        for mv in picking_out.move_lines:
             mv.quantity_done = mv.product_uom_qty
         picking_out.action_done()
         for line in self.rma_supplier_id.rma_line_ids[0]:
-            self.assertEquals(line.qty_to_receive, 3,
+            self.assertEquals(line.qty_to_receive, 0,
                               "Wrong qty to receive")
             self.assertEquals(line.qty_incoming, 0,
                               "Wrong qty incoming")
             self.assertEquals(line.qty_to_deliver, 0,
                               "Wrong qty to deliver")
-            self.assertEquals(line.qty_outgoing, 3,
+            self.assertEquals(line.qty_outgoing, 0,
                               "Wrong qty outgoing")
             if line.product_id == self.product_1:
-                self.assertEquals(line.qty_received, 0,
+                self.assertEquals(line.qty_received, 3,
                                   "Wrong qty received")
                 self.assertEquals(line.qty_delivered, 3,
                                   "Wrong qty delivered")
             if line.product_id == self.product_2:
-                self.assertEquals(line.qty_received, 0,
+                self.assertEquals(line.qty_received, 5,
                                   "Wrong qty received")
                 self.assertEquals(line.qty_delivered, 5,
                                   "Wrong qty delivered")
